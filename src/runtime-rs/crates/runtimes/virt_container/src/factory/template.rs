@@ -10,6 +10,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use hypervisor::{HYPERVISOR_NAME_CH, HYPERVISOR_QEMU};
 use kata_types::config::TomlConfig;
 use nix::mount::{mount, MsFlags};
 
@@ -20,6 +21,7 @@ const TEMPLATE_WAIT_FOR_AGENT: Duration = Duration::from_secs(2);
 
 /// Preallocated size (in MB) for saving the device state snapshot of the template VM.
 const TEMPLATE_DEVICE_STATE_SIZE_MB: u32 = 8;
+const MIB: u64 = 1024 * 1024;
 
 #[derive(Debug)]
 pub struct Template {
@@ -73,10 +75,30 @@ impl Template {
     }
 
     pub fn template_vm_exists(&self) -> bool {
-        let memory_path = self.state_path.join("memory");
-        let state_path = self.state_path.join("state");
+        if !self.memory_path().exists() || !self.device_state_path().exists() {
+            return false;
+        }
 
-        memory_path.exists() && state_path.exists()
+        self.config_path().is_none_or(|path| path.exists())
+    }
+
+    fn memory_path(&self) -> PathBuf {
+        self.state_path.join("memory")
+    }
+
+    fn device_state_path(&self) -> PathBuf {
+        match self.config.hypervisor_name.as_str() {
+            HYPERVISOR_NAME_CH => self.state_path.join("state.json"),
+            HYPERVISOR_QEMU => self.state_path.join("state"),
+            _ => self.state_path.join("state"),
+        }
+    }
+
+    fn config_path(&self) -> Option<PathBuf> {
+        match self.config.hypervisor_name.as_str() {
+            HYPERVISOR_NAME_CH => Some(self.state_path.join("config.json")),
+            _ => None,
+        }
     }
 
     pub fn prepare_template_files(&self) -> Result<()> {
@@ -119,9 +141,14 @@ impl Template {
         }
 
         // Create memory file
-        let memory_file = self.state_path.join("memory");
-        File::create(&memory_file)
+        let memory_file = self.memory_path();
+        let file = File::create(&memory_file)
             .context(format!("failed to create memory file: {memory_file:?}"))?;
+        let memory_size_bytes = u64::from(self.config.hypervisor_config.memory_info.default_memory)
+            .checked_mul(MIB)
+            .ok_or_else(|| anyhow!("template memory size overflows u64"))?;
+        file.set_len(memory_size_bytes)
+            .context(format!("failed to size memory file: {memory_file:?}"))?;
 
         // Verify memory file was created successfully
         if !memory_file.exists() {
@@ -140,9 +167,9 @@ impl Template {
         config.hypervisor_config.vm_template.boot_to_be_template = boot_to_be_template;
         config.hypervisor_config.vm_template.boot_from_template = !boot_to_be_template;
         config.hypervisor_config.vm_template.memory_path =
-            self.state_path.join("memory").to_string_lossy().to_string();
+            self.memory_path().to_string_lossy().to_string();
         config.hypervisor_config.vm_template.device_state_path =
-            self.state_path.join("state").to_string_lossy().to_string();
+            self.device_state_path().to_string_lossy().to_string();
         config
     }
 

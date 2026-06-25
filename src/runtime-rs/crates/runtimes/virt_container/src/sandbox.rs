@@ -230,16 +230,17 @@ impl VirtSandbox {
 
         let network_env: SandboxNetworkEnv = sandbox_config.network_env.clone();
         // prepare network config
-        if !network_env.network_created {
+        if !network_env.network_created && !self.is_factory_enabled() {
             if let Some(network_resource) = self.prepare_network_resource(&network_env).await {
                 resource_configs.push(network_resource);
             }
         }
 
         // prepare sharefs device config
-        let virtio_fs_config =
-            ResourceConfig::ShareFs(self.hypervisor.hypervisor_config().await.shared_fs);
-        resource_configs.push(virtio_fs_config);
+        let shared_fs = self.hypervisor.hypervisor_config().await.shared_fs;
+        if shared_fs.shared_fs.is_some() {
+            resource_configs.push(ResourceConfig::ShareFs(shared_fs));
+        }
 
         // prepare VM rootfs device config
         if let Some(block_config) = self
@@ -842,6 +843,34 @@ impl VirtSandbox {
         !prestart_hooks.is_empty() || !create_runtime_hooks.is_empty()
     }
 
+    fn is_factory_enabled(&self) -> bool {
+        self.factory
+            .as_ref()
+            .map(|factory| factory.enable_template)
+            .unwrap_or(false)
+    }
+
+    async fn setup_factory_network_after_start(
+        &self,
+        sandbox_config: &SandboxConfig,
+    ) -> Result<()> {
+        if !self.is_factory_enabled() {
+            return Ok(());
+        }
+
+        if let Some(ResourceConfig::Network(network_resource)) = self
+            .prepare_network_resource(&sandbox_config.network_env)
+            .await
+        {
+            self.resource_manager
+                .handle_network(network_resource)
+                .await
+                .context("set up factory network after start vm")?;
+        }
+
+        Ok(())
+    }
+
     /// Build a network rescan config targeting the hypervisor's network
     /// namespace.  Docker 26+ bind-mounts `/proc/<vmm_pid>/ns/net` and
     /// configures veth pairs there between Create and Start, so the
@@ -968,9 +997,12 @@ impl Sandbox for VirtSandbox {
         // 1. if there are pre-start hook functions, network config might have been changed.
         //    We need to rescan the netns to handle the change.
         // 2. Do not scan the netns if we want no network for the VM.
-        // TODO In case of vm factory, scan the netns to hotplug interfaces after the VM is started.
+        // Factory VMs defer network setup until after the VM is started so
+        // endpoints are hotplugged into the restored VM instead of being added
+        // to the template boot configuration.
         let config = self.resource_manager.config().await;
         if self.has_prestart_hooks(&prestart_hooks, &create_runtime_hooks)
+            && !self.is_factory_enabled()
             && !config.runtime.disable_new_netns
             && !dan_config_path(&config, &self.sid).exists()
         {
@@ -992,6 +1024,9 @@ impl Sandbox for VirtSandbox {
                     .context("set up device after start vm")?;
             }
         }
+
+        self.setup_factory_network_after_start(sandbox_config)
+            .await?;
 
         // connect agent
         // set agent socket
