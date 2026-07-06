@@ -18,7 +18,7 @@ use crate::ShareFsConfig;
 use crate::ShareFsDevice;
 use crate::VfioDevice;
 use crate::VmmState;
-use crate::{BlockConfig, BlockDevice};
+use crate::{BlockConfig, BlockDevice, BlockDeviceFormat};
 use anyhow::{anyhow, Context, Result};
 use ch_config::ch_api::cloud_hypervisor_vm_device_add;
 use ch_config::ch_api::{
@@ -501,12 +501,17 @@ impl TryFrom<BlockConfig> for DiskConfig {
     type Error = anyhow::Error;
 
     fn try_from(blkcfg: BlockConfig) -> Result<Self, Self::Error> {
+        let image_type = match blkcfg.format {
+            BlockDeviceFormat::Raw => ImageType::Raw,
+            BlockDeviceFormat::Vmdk => ImageType::FlatVmdk,
+        };
+
         let disk_config: DiskConfig = DiskConfig {
             path: Some(blkcfg.path_on_host.as_str().into()),
             readonly: blkcfg.is_readonly,
             num_queues: blkcfg.num_queues,
             queue_size: blkcfg.queue_size as u16,
-            image_type: ImageType::Raw,
+            image_type,
             ..Default::default()
         };
 
