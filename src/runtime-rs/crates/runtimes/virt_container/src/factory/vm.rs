@@ -315,6 +315,11 @@ impl TemplateVm {
             .map_err(|e| anyhow::anyhow!("failed to stop vm: {}", e))
     }
 
+    /// Remove runtime resources after the VM has stopped.
+    pub async fn cleanup(&self) -> Result<()> {
+        self.hypervisor.cleanup().await.context("cleanup vm")
+    }
+
     /// Disconnect agent
     pub async fn disconnect(&self) -> Result<()> {
         self.agent.disconnect().await.context("disconnect vm")
