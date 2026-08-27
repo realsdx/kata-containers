@@ -79,8 +79,9 @@ macro_rules! impl_agent {
     ($($name: tt | $req: ty | $resp: ty | $new_timeout: expr),*) => {
         #[async_trait]
         impl Agent for KataAgent {
+            $(
             #[instrument(skip(req))]
-            $(async fn $name(&self, req: $req) -> Result<$resp> {
+            async fn $name(&self, req: $req) -> Result<$resp> {
                 let r = req.into();
                 let (client, mut timeout, _) = self.get_agent_client().await.context("get client")?;
 

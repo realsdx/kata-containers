@@ -8,7 +8,6 @@ use std::cmp::min;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lazy_static::lazy_static;
 use opentelemetry::global;
 use opentelemetry::runtime::Tokio;
 use tracing::{span, subscriber::NoSubscriber, Span, Subscriber};
@@ -17,18 +16,6 @@ use tracing_subscriber::Registry;
 
 const DEFAULT_JAEGER_URL: &str = "http://localhost:14268/api/traces";
 
-lazy_static! {
-    /// The ROOTSPAN is a phantom span that is running by calling [`trace_enter_root()`] at the background
-    /// once the configuration is read and config.runtime.enable_tracing is enabled
-    /// The ROOTSPAN exits by calling [`trace_exit_root()`] on shutdown request sent from containerd
-    ///
-    /// NOTE:
-    ///     This allows other threads which are not directly running under some spans to be tracked easily
-    ///     within the entire sandbox's lifetime.
-    ///     To do this, you just need to add attribute #[instrment(parent=&(*ROOTSPAN))]
-    pub static ref ROOTSPAN: Span = span!(tracing::Level::TRACE, "root-span");
-}
-
 /// The tracer wrapper for kata-containers
 /// The fields and member methods should ALWAYS be PRIVATE and be exposed in a safe
 /// way to other modules
@@ -36,7 +23,9 @@ unsafe impl Send for KataTracer {}
 unsafe impl Sync for KataTracer {}
 pub struct KataTracer {
     subscriber: Arc<dyn Subscriber + Send + Sync>,
+    root_span: Option<Span>,
     enabled: bool,
+    finish_requested: bool,
 }
 
 impl Default for KataTracer {
@@ -50,7 +39,9 @@ impl KataTracer {
     pub fn new() -> Self {
         Self {
             subscriber: Arc::new(NoSubscriber::default()),
+            root_span: None,
             enabled: false,
+            finish_requested: false,
         }
     }
 
@@ -85,7 +76,7 @@ impl KataTracer {
             .with_endpoint(endpoint)
             .with_username(jaeger_username)
             .with_password(jaeger_password)
-            .with_hyper()
+            .with_reqwest()
             .install_batch(Tokio)?;
 
         let layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -98,8 +89,8 @@ impl KataTracer {
         tracing::subscriber::set_global_default(subscriber.clone())?;
         self.subscriber = subscriber;
 
-        // enter the rootspan
-        self.trace_enter_root();
+        // Keep one owned handle so all shim requests can share a sandbox-lifetime parent.
+        self.root_span = Some(span!(tracing::Level::TRACE, "root-span", sandbox_id = %sid));
 
         // modity the enable state, note that we have successfully enable tracing
         self.enable();
@@ -108,42 +99,32 @@ impl KataTracer {
         Ok(())
     }
 
-    /// Shutdown the tracer and emit the span info to jaeger agent
-    /// The tracing information is only partially update to jaeger agent before this function is called
-    pub fn trace_end(&self) {
-        if self.enabled() {
-            // exit the rootspan
-            self.trace_exit_root();
+    pub fn root_span(&self) -> Option<Span> {
+        self.root_span.clone()
+    }
 
-            global::shutdown_tracer_provider();
+    pub fn request_finish(&mut self) {
+        self.finish_requested = true;
+    }
+
+    /// Finish tracing after the final request span has closed.
+    pub fn finish_if_requested(&mut self) -> bool {
+        if !self.finish_requested {
+            return false;
         }
+        self.finish_requested = false;
+
+        if self.enabled() {
+            // Dropping the final owned handle closes the root before provider shutdown.
+            self.root_span.take();
+            self.enabled = false;
+        }
+
+        true
     }
 
-    /// Enter the global ROOTSPAN
-    /// This function is a hack on tracing library's guard approach, letting the span
-    /// to enter without using a RAII guard to exit. This function should only be called
-    /// once, and also in paired with [`trace_exit_root()`].
-    fn trace_enter_root(&self) {
-        self.enter_span(&ROOTSPAN);
-    }
-
-    /// Exit the global ROOTSPAN
-    /// This should be called in paired with [`trace_enter_root()`].
-    fn trace_exit_root(&self) {
-        self.exit_span(&ROOTSPAN);
-    }
-
-    /// let the subscriber enter the span, this has to be called in pair with exit(span)
-    /// This function allows **cross function span** to run without span guard
-    fn enter_span(&self, span: &Span) {
-        let id: Option<span::Id> = span.into();
-        self.subscriber.enter(&id.unwrap());
-    }
-
-    /// let the subscriber exit the span, this has to be called in pair to enter(span)
-    fn exit_span(&self, span: &Span) {
-        let id: Option<span::Id> = span.into();
-        self.subscriber.exit(&id.unwrap());
+    pub fn shutdown_provider() {
+        global::shutdown_tracer_provider();
     }
 }
 

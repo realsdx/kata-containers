@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 slog = { workspace = true }
 slog-scope = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing = { workspace = true }
 ttrpc = { workspace = true }
 containerd-shim-protos = { workspace = true, features = ["async", "sandbox"] }
 containerd-shim = { workspace = true }

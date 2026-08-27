@@ -134,7 +134,15 @@ impl RuntimeHandler for VirtContainer {
         Arc::new(VirtContainer {})
     }
 
-    #[instrument]
+    #[instrument(
+        name = "runtime.instance.create",
+        skip_all,
+        fields(
+            sandbox_id = %sid,
+            hypervisor = %config.runtime.hypervisor_name,
+            template_enabled = config.get_factory().enable_template
+        )
+    )]
     async fn new_instance(
         &self,
         sid: &str,

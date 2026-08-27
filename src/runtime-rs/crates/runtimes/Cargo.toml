@@ -26,7 +26,7 @@ opentelemetry = { version = "0.18.0", features = [
 ] }
 opentelemetry-jaeger = { version = "0.17.0", features = [
     "rt-tokio",
-    "hyper_collector_client",
+    "reqwest_collector_client",
     "collector_client",
 ] }
 tracing-subscriber = { version = "0.3", features = ["registry", "std"] }

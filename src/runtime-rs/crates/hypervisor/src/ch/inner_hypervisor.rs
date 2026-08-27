@@ -54,6 +54,7 @@ use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::{io::AsyncBufReadExt, sync::mpsc};
+use tracing::{instrument, Span};
 
 const CH_NAME: &str = "clh";
 
@@ -98,6 +99,11 @@ pub enum GuestProtectionError {
 }
 
 impl CloudHypervisorInner {
+    #[instrument(
+        name = "clh.vmm.start",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     async fn start_hypervisor(&mut self, timeout_secs: i32) -> Result<()> {
         self.cloud_hypervisor_launch(timeout_secs)
             .await
@@ -187,6 +193,11 @@ impl CloudHypervisorInner {
         Ok(kernel_params)
     }
 
+    #[instrument(
+        name = "clh.vm.boot",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     async fn boot_vm(&mut self) -> Result<()> {
         let (shared_fs_devices, network_devices, host_devices, protection_device, boot_disks) =
             self.get_shared_devices().await?;
@@ -350,6 +361,11 @@ impl CloudHypervisorInner {
         Self::write_json_file(config_path, &config)
     }
 
+    #[instrument(
+        name = "clh.template.prepare-artifacts",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     fn prepare_restore_files(&self) -> Result<()> {
         let template_dir = self
             .template_dir()
@@ -372,6 +388,11 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        name = "clh.template.restore",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     async fn restore_vm(&self) -> Result<()> {
         let vm_path = PathBuf::from(&self.vm_path);
         let state_file = vm_path.join(CLH_TEMPLATE_STATE_FILE);
@@ -404,6 +425,11 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        name = "clh.vmm.api-ready",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     async fn cloud_hypervisor_setup_comms(&mut self) -> Result<()> {
         let api_socket_path = get_api_socket_path(&self.id)?;
 
@@ -471,6 +497,11 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        name = "clh.vmm.launch",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     async fn cloud_hypervisor_launch(&mut self, _timeout_secs: i32) -> Result<()> {
         self.cloud_hypervisor_ensure_not_launched().await?;
 
@@ -789,13 +820,33 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        name = "clh.vm.start",
+        skip_all,
+        fields(
+            sandbox_id = %self.id,
+            template_requested = self.config.vm_template.boot_from_template,
+            startup_mode = tracing::field::Empty
+        )
+    )]
     pub(crate) async fn start_vm(&mut self, timeout_secs: i32) -> Result<()> {
         self.timeout_secs = timeout_secs;
         self.start_hypervisor(self.timeout_secs).await?;
 
         self.state = VmmState::VmmServerReady;
 
-        if self.config.vm_template.boot_from_template && self.should_restore_from_template() {
+        let template_requested = self.config.vm_template.boot_from_template;
+        let restore_from_template = template_requested && self.should_restore_from_template();
+        let startup_mode = if restore_from_template {
+            "template_restore"
+        } else if template_requested {
+            "template_fallback"
+        } else {
+            "cold"
+        };
+        Span::current().record("startup_mode", startup_mode);
+
+        if restore_from_template {
             self.prepare_restore_files()?;
             self.restore_vm().await?;
             self.resume_vm().await?;
@@ -833,6 +884,11 @@ impl CloudHypervisorInner {
         Ok(0)
     }
 
+    #[instrument(
+        name = "clh.vm.pause",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     pub(crate) async fn pause_vm(&self) -> Result<()> {
         let response = cloud_hypervisor_vm_pause(&self.api_socket).await?;
         if let Some(detail) = response {
@@ -841,6 +897,11 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        name = "clh.vm.resume",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     pub(crate) async fn resume_vm(&self) -> Result<()> {
         let response = cloud_hypervisor_vm_resume(&self.api_socket).await?;
         if let Some(detail) = response {
@@ -849,6 +910,11 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        name = "clh.template.snapshot",
+        skip_all,
+        fields(sandbox_id = %self.id)
+    )]
     pub(crate) async fn save_vm(&self) -> Result<()> {
         let snapshot_dir = self
             .template_dir()

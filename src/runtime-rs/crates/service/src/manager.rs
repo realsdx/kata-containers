@@ -93,6 +93,8 @@ impl ServiceManager {
                     Action::Start => self.start_service().await.context("start listen"),
                     Action::Stop => self.stop_service().await.context("stop listen"),
                     Action::Shutdown => {
+                        // Keep the shim alive until the final request and root spans are exported.
+                        self.handler.wait_for_tracing_finish().await;
                         self.stop_service().await.context("stop listen")?;
                         break;
                     }

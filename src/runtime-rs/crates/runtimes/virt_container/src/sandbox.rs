@@ -90,7 +90,7 @@ use std::time::SystemTime;
 use strum::Display;
 use tokio::sync::{mpsc::Sender, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::instrument;
+use tracing::{info_span, instrument, Instrument};
 
 pub(crate) const VIRTCONTAINER: &str = "virt_container";
 
@@ -236,7 +236,11 @@ impl VirtSandbox {
         let _ = self.exit_notify_tx.send(true);
     }
 
-    #[instrument]
+    #[instrument(
+        name = "sandbox.resources.prepare",
+        skip_all,
+        fields(sandbox_id = %id)
+    )]
     async fn prepare_for_start_sandbox(
         &self,
         id: &str,
@@ -593,6 +597,15 @@ impl VirtSandbox {
         }
     }
 
+    #[instrument(
+        name = "sandbox.hooks.execute",
+        skip_all,
+        fields(
+            sandbox_id = %self.sid,
+            prestart_hook_count = prestart_hooks.len(),
+            create_runtime_hook_count = create_runtime_hooks.len()
+        )
+    )]
     async fn execute_oci_hook_functions(
         &self,
         prestart_hooks: &[oci::Hook],
@@ -626,6 +639,11 @@ impl VirtSandbox {
     }
 
     // store_guest_details will get the information from the guest OS, like memory block size, agent details and is memory hotplug probe support
+    #[instrument(
+        name = "sandbox.guest-details.store",
+        skip_all,
+        fields(sandbox_id = %self.sid)
+    )]
     async fn store_guest_details(&self) -> Result<()> {
         // get the information from agent
         let guest_details = self
@@ -918,6 +936,11 @@ impl VirtSandbox {
             .is_network_device_hotplug_supported())
     }
 
+    #[instrument(
+        name = "sandbox.network.setup-deferred",
+        skip_all,
+        fields(sandbox_id = %self.sid)
+    )]
     async fn setup_deferred_network_after_start(
         &self,
         sandbox_config: &SandboxConfig,
@@ -1001,7 +1024,14 @@ fn oci_spec_vfio_device_paths() -> Vec<String> {
 
 #[async_trait]
 impl Sandbox for VirtSandbox {
-    #[instrument(name = "sb: start")]
+    #[instrument(
+        name = "sandbox.start",
+        skip_all,
+        fields(
+            sandbox_id = %self.sid,
+            template_enabled = self.is_factory_enabled()
+        )
+    )]
     async fn start(&self) -> Result<()> {
         let id = &self.sid;
 
@@ -1031,6 +1061,11 @@ impl Sandbox for VirtSandbox {
                 &sandbox_config.annotations,
                 selinux_label,
             )
+            .instrument(info_span!(
+                "hypervisor.prepare",
+                sandbox_id = %id,
+                template_enabled = self.is_factory_enabled()
+            ))
             .await
             .context("prepare vm")?;
 
@@ -1046,7 +1081,15 @@ impl Sandbox for VirtSandbox {
             .context("set up device before start vm")?;
 
         // start vm
-        self.hypervisor.start_vm(10_000).await.context("start vm")?;
+        self.hypervisor
+            .start_vm(10_000)
+            .instrument(info_span!(
+                "vm.start",
+                sandbox_id = %id,
+                template_enabled = self.is_factory_enabled()
+            ))
+            .await
+            .context("start vm")?;
         info!(sl!(), "start vm");
 
         let sandbox = self.clone();
@@ -1223,7 +1266,10 @@ impl Sandbox for VirtSandbox {
         });
 
         self.monitor.start(id, self.agent.clone());
-        self.save().await.context("save state")?;
+        self.save()
+            .instrument(info_span!("sandbox.persist", sandbox_id = %id))
+            .await
+            .context("save state")?;
 
         Ok(())
     }
