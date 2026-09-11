@@ -76,6 +76,10 @@ impl KataTracer {
         jaeger_username: &str,
         jaeger_password: &str,
     ) -> Result<()> {
+        if self.enabled() {
+            return Ok(());
+        }
+
         // If varify jaeger config returns an error, it means that the tracing should not be enabled
         let endpoint = verify_jaeger_config(jaeger_endpoint, jaeger_username, jaeger_password)?;
 

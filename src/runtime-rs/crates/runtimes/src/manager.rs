@@ -151,19 +151,6 @@ impl RuntimeHandlerManagerInner {
             .await
             .context("new runtime instance")?;
 
-        // initilize the trace subscriber
-        if config.runtime.enable_tracing {
-            let mut tracer = self.kata_tracer.lock().await;
-            if let Err(e) = tracer.trace_setup(
-                &self.id,
-                &config.runtime.jaeger_endpoint,
-                &config.runtime.jaeger_user,
-                &config.runtime.jaeger_password,
-            ) {
-                warn!(sl!(), "failed to setup tracing, {:?}", e);
-            }
-        }
-
         let instance = Arc::new(runtime_instance);
         self.runtime_instance = Some(instance.clone());
 
@@ -248,6 +235,18 @@ impl RuntimeHandlerManagerInner {
             .context("failed to setup static resource mgmt config")?;
 
         update_component_log_level(&config);
+
+        if config.runtime.enable_tracing {
+            let mut tracer = self.kata_tracer.lock().await;
+            if let Err(e) = tracer.trace_setup(
+                &self.id,
+                &config.runtime.jaeger_endpoint,
+                &config.runtime.jaeger_user,
+                &config.runtime.jaeger_password,
+            ) {
+                warn!(sl!(), "failed to setup tracing, {:?}", e);
+            }
+        }
 
         let dan_path = dan_config_path(&config, &self.id);
         // set netns to None if we want no network for the VM
