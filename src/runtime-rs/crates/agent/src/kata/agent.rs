@@ -75,61 +75,90 @@ impl_health_service!(
     version | crate::CheckRequest | crate::VersionCheckResponse
 );
 
+macro_rules! agent_request {
+    ($agent:ident, $name:tt, $req:ident, $timeout_override:expr) => {{
+        let r = $req.into();
+        let (client, mut timeout, _) = $agent.get_agent_client().await.context("get client")?;
+
+        // update new timeout
+        if let Some(v) = $timeout_override {
+            timeout = v;
+        }
+
+        let resp = client
+            .$name(new_ttrpc_ctx(timeout * MILLISECOND_TO_NANOSECOND), &r)
+            .await?;
+        Ok(resp.into())
+    }};
+}
+
 macro_rules! impl_agent {
-    ($($name: tt | $req: ty | $resp: ty | $new_timeout: expr),*) => {
+    (
+        traced {
+            $($traced_name: tt | $traced_req: ty | $traced_resp: ty | $traced_timeout: expr),* $(,)?
+        }
+        untraced {
+            $($untraced_name: tt | $untraced_req: ty | $untraced_resp: ty | $untraced_timeout: expr),* $(,)?
+        }
+    ) => {
         #[async_trait]
         impl Agent for KataAgent {
-            #[instrument(skip(req))]
-            $(async fn $name(&self, req: $req) -> Result<$resp> {
-                let r = req.into();
-                let (client, mut timeout, _) = self.get_agent_client().await.context("get client")?;
+            $(
+            async fn $traced_name(&self, req: $traced_req) -> Result<$traced_resp> {
+                let span = tracing::info_span!(concat!("agent.", stringify!($traced_name)));
+                let result = async {
+                    agent_request!(self, $traced_name, req, $traced_timeout)
+                };
+                tracing::Instrument::instrument(result, span).await
+            })*
 
-                // update new timeout
-                if let Some(v) = $new_timeout {
-                    timeout = v;
-                }
-
-                let resp = client.$name(new_ttrpc_ctx(timeout * MILLISECOND_TO_NANOSECOND), &r).await?;
-                Ok(resp.into())
+            $(
+            async fn $untraced_name(&self, req: $untraced_req) -> Result<$untraced_resp> {
+                agent_request!(self, $untraced_name, req, $untraced_timeout)
             })*
         }
     };
 }
 
-impl_agent!(
-    create_container | crate::CreateContainerRequest | crate::Empty | None,
-    start_container | crate::ContainerID | crate::Empty | None,
-    remove_container | crate::RemoveContainerRequest | crate::Empty | None,
-    exec_process | crate::ExecProcessRequest | crate::Empty | None,
-    signal_process | crate::SignalProcessRequest | crate::Empty | None,
-    wait_process | crate::WaitProcessRequest | crate::WaitProcessResponse | Some(0),
-    update_container | crate::UpdateContainerRequest | crate::Empty | None,
-    stats_container | crate::ContainerID | crate::StatsContainerResponse | None,
-    pause_container | crate::ContainerID | crate::Empty | None,
-    resume_container | crate::ContainerID | crate::Empty | None,
-    write_stdin | crate::WriteStreamRequest | crate::WriteStreamResponse | Some(0),
-    read_stdout | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
-    read_stderr | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
-    close_stdin | crate::CloseStdinRequest | crate::Empty | None,
-    tty_win_resize | crate::TtyWinResizeRequest | crate::Empty | None,
-    update_interface | crate::UpdateInterfaceRequest | crate::Interface | None,
-    update_routes | crate::UpdateRoutesRequest | crate::Routes | None,
-    add_arp_neighbors | crate::AddArpNeighborRequest | crate::Empty | None,
-    list_interfaces | crate::Empty | crate::Interfaces | None,
-    list_routes | crate::Empty | crate::Routes | None,
-    create_sandbox | crate::CreateSandboxRequest | crate::Empty | None,
-    destroy_sandbox | crate::Empty | crate::Empty | None,
-    copy_file | crate::CopyFileRequest | crate::Empty | None,
-    get_oom_event | crate::Empty | crate::OomEventResponse | Some(0),
-    get_ip_tables | crate::GetIPTablesRequest | crate::GetIPTablesResponse | None,
-    set_ip_tables | crate::SetIPTablesRequest | crate::SetIPTablesResponse | None,
-    get_volume_stats | crate::VolumeStatsRequest | crate::VolumeStatsResponse | None,
-    resize_volume | crate::ResizeVolumeRequest | crate::Empty | None,
-    online_cpu_mem | crate::OnlineCPUMemRequest | crate::Empty | None,
-    get_metrics | crate::Empty | crate::MetricsResponse | None,
-    get_guest_details | crate::GetGuestDetailsRequest | crate::GuestDetailsResponse | None,
-    add_swap | crate::AddSwapRequest | crate::Empty | None,
-    add_swap_path | crate::AddSwapPathRequest | crate::Empty | None,
-    set_policy | crate::SetPolicyRequest | crate::Empty | None,
-    get_diagnostic_data | crate::GetDiagnosticDataRequest | crate::GetDiagnosticDataResponse | None
-);
+impl_agent! {
+    traced {
+        create_container | crate::CreateContainerRequest | crate::Empty | None,
+        start_container | crate::ContainerID | crate::Empty | None,
+        remove_container | crate::RemoveContainerRequest | crate::Empty | None,
+        exec_process | crate::ExecProcessRequest | crate::Empty | None,
+        signal_process | crate::SignalProcessRequest | crate::Empty | None,
+        wait_process | crate::WaitProcessRequest | crate::WaitProcessResponse | Some(0),
+        update_container | crate::UpdateContainerRequest | crate::Empty | None,
+        stats_container | crate::ContainerID | crate::StatsContainerResponse | None,
+        pause_container | crate::ContainerID | crate::Empty | None,
+        resume_container | crate::ContainerID | crate::Empty | None,
+        close_stdin | crate::CloseStdinRequest | crate::Empty | None,
+        tty_win_resize | crate::TtyWinResizeRequest | crate::Empty | None,
+        update_interface | crate::UpdateInterfaceRequest | crate::Interface | None,
+        update_routes | crate::UpdateRoutesRequest | crate::Routes | None,
+        add_arp_neighbors | crate::AddArpNeighborRequest | crate::Empty | None,
+        list_interfaces | crate::Empty | crate::Interfaces | None,
+        list_routes | crate::Empty | crate::Routes | None,
+        create_sandbox | crate::CreateSandboxRequest | crate::Empty | None,
+        destroy_sandbox | crate::Empty | crate::Empty | None,
+        copy_file | crate::CopyFileRequest | crate::Empty | None,
+        get_ip_tables | crate::GetIPTablesRequest | crate::GetIPTablesResponse | None,
+        set_ip_tables | crate::SetIPTablesRequest | crate::SetIPTablesResponse | None,
+        get_volume_stats | crate::VolumeStatsRequest | crate::VolumeStatsResponse | None,
+        resize_volume | crate::ResizeVolumeRequest | crate::Empty | None,
+        online_cpu_mem | crate::OnlineCPUMemRequest | crate::Empty | None,
+        get_metrics | crate::Empty | crate::MetricsResponse | None,
+        get_guest_details | crate::GetGuestDetailsRequest | crate::GuestDetailsResponse | None,
+        add_swap | crate::AddSwapRequest | crate::Empty | None,
+        add_swap_path | crate::AddSwapPathRequest | crate::Empty | None,
+        set_policy | crate::SetPolicyRequest | crate::Empty | None,
+        get_diagnostic_data | crate::GetDiagnosticDataRequest | crate::GetDiagnosticDataResponse | None,
+    }
+    // Detached I/O and watcher loops would emit noisy spans outside the sandbox root.
+    untraced {
+        write_stdin | crate::WriteStreamRequest | crate::WriteStreamResponse | Some(0),
+        read_stdout | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
+        read_stderr | crate::ReadStreamRequest | crate::ReadStreamResponse | Some(0),
+        get_oom_event | crate::Empty | crate::OomEventResponse | Some(0),
+    }
+}
