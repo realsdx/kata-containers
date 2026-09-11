@@ -55,11 +55,11 @@ use std::{
     os::unix::fs::{chown, MetadataExt},
     path::{Path, PathBuf},
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use tokio::fs;
-use tokio::sync::{mpsc::Sender, Mutex, RwLock};
-use tracing::instrument;
+use tokio::sync::{mpsc::Sender, oneshot, Mutex, RwLock};
+use tracing::{instrument, Instrument, Span};
 #[cfg(feature = "virt")]
 use virt_container::{
     sandbox::{SandboxRestoreArgs, VirtSandbox},
@@ -69,10 +69,10 @@ use virt_container::{
 #[cfg(feature = "wasm")]
 use wasm_container::WasmContainer;
 
-use crate::{
-    shim_mgmt::server::MgmtServer,
-    tracer::{KataTracer, ROOTSPAN},
-};
+use crate::{shim_mgmt::server::MgmtServer, tracer::KataTracer};
+
+const ROOT_SPAN_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const TRACING_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn convert_string_to_slog_level(string_level: &str) -> slog::Level {
     match string_level {
@@ -254,7 +254,14 @@ impl RuntimeHandlerManagerInner {
             sandbox_config.network_env.netns = None;
         }
 
+        let root_span = self
+            .kata_tracer
+            .lock()
+            .await
+            .root_span()
+            .unwrap_or_else(Span::none);
         self.init_runtime_handler(sandbox_config, Arc::new(config), initial_size_manager)
+            .instrument(root_span)
             .await
             .context("init runtime handler")?;
 
@@ -371,6 +378,53 @@ impl RuntimeHandlerManager {
         Ok(inner.get_kata_tracer())
     }
 
+    async fn trace_parent(&self) -> Option<Span> {
+        let tracer = self.get_kata_tracer().await.ok()?;
+        let tracer = tracer.lock().await;
+        tracer.root_span()
+    }
+
+    pub async fn finish_tracing(&self) {
+        let finish = async {
+            let tracer = self.get_kata_tracer().await?;
+            let root_closed = tracer.lock().await.begin_shutdown();
+            let Some(root_closed) = root_closed else {
+                return Ok(());
+            };
+
+            if tokio::time::timeout(ROOT_SPAN_CLOSE_TIMEOUT, root_closed.notified())
+                .await
+                .is_err()
+            {
+                warn!(
+                    sl!(),
+                    "tracing spans still active; exporting completed spans only"
+                );
+            }
+
+            // Unlike spawn_blocking, a detached thread cannot hold up Tokio runtime teardown.
+            let (completed, receiver) = oneshot::channel();
+            std::thread::Builder::new()
+                .name("kata-trace-shutdown".to_owned())
+                .spawn(move || {
+                    KataTracer::shutdown_provider();
+                    let _ = completed.send(());
+                })
+                .context("spawn tracer shutdown thread")?;
+            receiver.await.context("tracer shutdown thread stopped")
+        };
+
+        // Bound the entire tracing phase, including lock acquisition and span draining.
+        match tokio::time::timeout(TRACING_SHUTDOWN_TIMEOUT, finish).await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => warn!(sl!(), "failed to finish tracing: {:?}", err),
+            Err(_) => warn!(
+                sl!(),
+                "tracing shutdown timed out; continuing shim shutdown"
+            ),
+        }
+    }
+
     //init the sandbox for the normal task api
     #[instrument]
     async fn task_init_runtime_instance(
@@ -480,7 +534,7 @@ impl RuntimeHandlerManager {
         inner.try_init(sandbox_config, None, &None).await
     }
 
-    #[instrument(parent = &*(ROOTSPAN))]
+    #[instrument(skip_all, parent = self.trace_parent().await.unwrap_or_else(Span::none))]
     pub async fn handler_sandbox_message(&self, req: SandboxRequest) -> Result<SandboxResponse> {
         if let SandboxRequest::CreateSandbox(sandbox_config) = req {
             let config = sandbox_config.deref().clone();
@@ -497,7 +551,7 @@ impl RuntimeHandlerManager {
         }
     }
 
-    #[instrument(parent = &*(ROOTSPAN))]
+    #[instrument(skip_all, parent = self.trace_parent().await.unwrap_or_else(Span::none))]
     pub async fn handler_task_message(&self, req: TaskRequest) -> Result<TaskResponse> {
         if let TaskRequest::CreateContainer(container_config) = req {
             // get oci spec
@@ -523,10 +577,12 @@ impl RuntimeHandlerManager {
                 .get_runtime_instance()
                 .await
                 .context("get runtime instance")?;
+            let root_span = self.trace_parent().await.unwrap_or_else(Span::none);
 
             instance
                 .sandbox
                 .start()
+                .instrument(root_span.clone())
                 .await
                 .context("start sandbox in task handler")?;
 
@@ -535,6 +591,7 @@ impl RuntimeHandlerManager {
             let shim_pid = instance
                 .container_manager
                 .create_container(container_config, spec)
+                .instrument(root_span)
                 .await
                 .context("create container")?;
 
@@ -649,7 +706,7 @@ impl RuntimeHandlerManager {
         }
     }
 
-    #[instrument(parent = &(*ROOTSPAN))]
+    #[instrument(skip_all)]
     pub async fn handler_task_request(&self, req: TaskRequest) -> Result<TaskResponse> {
         let instance = self
             .get_runtime_instance()
@@ -694,11 +751,6 @@ impl RuntimeHandlerManager {
             TaskRequest::ShutdownContainer(req) => {
                 if cm.need_shutdown_sandbox(&req).await {
                     sandbox.shutdown().await.context("do shutdown")?;
-
-                    // stop the tracer collector
-                    let kata_tracer = self.get_kata_tracer().await.context("get kata tracer")?;
-                    let tracer = kata_tracer.lock().await;
-                    tracer.trace_end();
                 }
                 Ok(TaskResponse::ShutdownContainer)
             }
@@ -1130,6 +1182,10 @@ mod tests {
             .try_recv()
             .expect("an Action::Shutdown message must be sent to stop the daemon");
         assert!(matches!(msg.action, Action::Shutdown));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), manager.finish_tracing())
+            .await
+            .expect("disabled tracing must not delay service shutdown");
     }
 
     #[test]

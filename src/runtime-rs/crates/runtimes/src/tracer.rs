@@ -8,25 +8,35 @@ use std::cmp::min;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lazy_static::lazy_static;
 use opentelemetry::global;
 use opentelemetry::runtime::Tokio;
+use tokio::sync::Notify;
 use tracing::{span, subscriber::NoSubscriber, Span, Subscriber};
+use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Registry;
 
 const DEFAULT_JAEGER_URL: &str = "http://localhost:14268/api/traces";
 
-lazy_static! {
-    /// The ROOTSPAN is a phantom span that is running by calling [`trace_enter_root()`] at the background
-    /// once the configuration is read and config.runtime.enable_tracing is enabled
-    /// The ROOTSPAN exits by calling [`trace_exit_root()`] on shutdown request sent from containerd
-    ///
-    /// NOTE:
-    ///     This allows other threads which are not directly running under some spans to be tracked easily
-    ///     within the entire sandbox's lifetime.
-    ///     To do this, you just need to add attribute #[instrment(parent=&(*ROOTSPAN))]
-    pub static ref ROOTSPAN: Span = span!(tracing::Level::TRACE, "root-span");
+// Wait for the root span to close before shutting down the exporter;
+// otherwise the final root span can be lost. Dropping our handle is not
+// enough: active child spans also hold references to the root.
+struct RootSpanCloseLayer {
+    closed: Arc<Notify>,
+}
+
+impl<SubscriberType> Layer<SubscriberType> for RootSpanCloseLayer
+where
+    SubscriberType: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_close(&self, id: span::Id, ctx: Context<'_, SubscriberType>) {
+        if let Some(span) = ctx.span(&id) {
+            if span.metadata().target() == module_path!() && span.name() == "root-span" {
+                self.closed.notify_one();
+            }
+        }
+    }
 }
 
 /// The tracer wrapper for kata-containers
@@ -36,6 +46,8 @@ unsafe impl Send for KataTracer {}
 unsafe impl Sync for KataTracer {}
 pub struct KataTracer {
     subscriber: Arc<dyn Subscriber + Send + Sync>,
+    root_span: Option<Span>,
+    root_closed: Arc<Notify>,
     enabled: bool,
 }
 
@@ -50,6 +62,8 @@ impl KataTracer {
     pub fn new() -> Self {
         Self {
             subscriber: Arc::new(NoSubscriber::default()),
+            root_span: None,
+            root_closed: Arc::new(Notify::new()),
             enabled: false,
         }
     }
@@ -94,7 +108,10 @@ impl KataTracer {
 
         let layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-        let sub = Registry::default().with(layer);
+        // Keep this layer outermost so OpenTelemetry queues the root before we notify shutdown.
+        let sub = Registry::default().with(layer).with(RootSpanCloseLayer {
+            closed: self.root_closed.clone(),
+        });
 
         // we use Arc to let global subscriber and katatracer to SHARE the SAME subscriber
         // this is for record the global subscriber into a global variable KATA_TRACER for more usages
@@ -102,8 +119,7 @@ impl KataTracer {
         tracing::subscriber::set_global_default(subscriber.clone())?;
         self.subscriber = subscriber;
 
-        // enter the rootspan
-        self.trace_enter_root();
+        self.root_span = Some(span!(parent: None, tracing::Level::TRACE, "root-span"));
 
         // modity the enable state, note that we have successfully enable tracing
         self.enable();
@@ -112,42 +128,18 @@ impl KataTracer {
         Ok(())
     }
 
-    /// Shutdown the tracer and emit the span info to jaeger agent
-    /// The tracing information is only partially update to jaeger agent before this function is called
-    pub fn trace_end(&self) {
-        if self.enabled() {
-            // exit the rootspan
-            self.trace_exit_root();
-
-            global::shutdown_tracer_provider();
-        }
+    pub fn begin_shutdown(&mut self) -> Option<Arc<Notify>> {
+        drop(self.root_span.take()?);
+        // Notify retains a permit if the root closed synchronously before the waiter starts.
+        Some(self.root_closed.clone())
     }
 
-    /// Enter the global ROOTSPAN
-    /// This function is a hack on tracing library's guard approach, letting the span
-    /// to enter without using a RAII guard to exit. This function should only be called
-    /// once, and also in paired with [`trace_exit_root()`].
-    fn trace_enter_root(&self) {
-        self.enter_span(&ROOTSPAN);
+    pub fn shutdown_provider() {
+        global::shutdown_tracer_provider();
     }
 
-    /// Exit the global ROOTSPAN
-    /// This should be called in paired with [`trace_enter_root()`].
-    fn trace_exit_root(&self) {
-        self.exit_span(&ROOTSPAN);
-    }
-
-    /// let the subscriber enter the span, this has to be called in pair with exit(span)
-    /// This function allows **cross function span** to run without span guard
-    fn enter_span(&self, span: &Span) {
-        let id: Option<span::Id> = span.into();
-        self.subscriber.enter(&id.unwrap());
-    }
-
-    /// let the subscriber exit the span, this has to be called in pair to enter(span)
-    fn exit_span(&self, span: &Span) {
-        let id: Option<span::Id> = span.into();
-        self.subscriber.exit(&id.unwrap());
+    pub fn root_span(&self) -> Option<Span> {
+        self.root_span.clone()
     }
 }
 

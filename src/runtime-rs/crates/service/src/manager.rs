@@ -94,6 +94,7 @@ impl ServiceManager {
                     Action::Stop => self.stop_service().await.context("stop listen"),
                     Action::Shutdown => {
                         self.stop_service().await.context("stop listen")?;
+                        self.handler.finish_tracing().await;
                         break;
                     }
                     Action::Event(event) => {
