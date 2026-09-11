@@ -13,6 +13,7 @@ containerd-shim-protos = { features = ["async", "sandbox"], workspace = true }
 slog = { workspace = true }
 slog-scope = { workspace = true }
 tokio = { features = ["rt-multi-thread"], workspace = true }
+tracing = { workspace = true }
 ttrpc = { workspace = true }
 
 # Local dependencies

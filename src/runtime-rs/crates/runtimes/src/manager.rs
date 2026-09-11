@@ -59,7 +59,7 @@ use std::{
 };
 use tokio::fs;
 use tokio::sync::{mpsc::Sender, oneshot, Mutex, RwLock};
-use tracing::{instrument, Instrument, Span};
+use tracing::{info_span, instrument, Instrument, Span};
 #[cfg(feature = "virt")]
 use virt_container::{
     sandbox::{SandboxRestoreArgs, VirtSandbox},
@@ -157,7 +157,7 @@ impl RuntimeHandlerManagerInner {
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn try_init(
         &mut self,
         mut sandbox_config: SandboxConfig,
@@ -254,14 +254,17 @@ impl RuntimeHandlerManagerInner {
             sandbox_config.network_env.netns = None;
         }
 
-        let root_span = self
-            .kata_tracer
-            .lock()
-            .await
-            .root_span()
-            .unwrap_or_else(Span::none);
+        let mut parent = Span::current();
+        if parent.is_disabled() {
+            parent = self
+                .kata_tracer
+                .lock()
+                .await
+                .root_span()
+                .unwrap_or_else(Span::none);
+        }
         self.init_runtime_handler(sandbox_config, Arc::new(config), initial_size_manager)
-            .instrument(root_span)
+            .instrument(parent)
             .await
             .context("init runtime handler")?;
 
@@ -378,7 +381,7 @@ impl RuntimeHandlerManager {
         Ok(inner.get_kata_tracer())
     }
 
-    async fn trace_parent(&self) -> Option<Span> {
+    pub async fn trace_parent(&self) -> Option<tracing::Span> {
         let tracer = self.get_kata_tracer().await.ok()?;
         let tracer = tracer.lock().await;
         tracer.root_span()
@@ -426,7 +429,7 @@ impl RuntimeHandlerManager {
     }
 
     //init the sandbox for the normal task api
-    #[instrument]
+    #[instrument(skip_all)]
     async fn task_init_runtime_instance(
         &self,
         spec: &mut oci::Spec,
@@ -524,7 +527,7 @@ impl RuntimeHandlerManager {
     }
 
     //init the sandbox for the sandbox api
-    #[instrument]
+    #[instrument(skip_all)]
     async fn sandbox_init_runtime_instance(&self, sandbox_config: SandboxConfig) -> Result<()> {
         let mut inner = self.inner.write().await;
         // return if runtime instance has init
@@ -534,7 +537,6 @@ impl RuntimeHandlerManager {
         inner.try_init(sandbox_config, None, &None).await
     }
 
-    #[instrument(skip_all, parent = self.trace_parent().await.unwrap_or_else(Span::none))]
     pub async fn handler_sandbox_message(&self, req: SandboxRequest) -> Result<SandboxResponse> {
         if let SandboxRequest::CreateSandbox(sandbox_config) = req {
             let config = sandbox_config.deref().clone();
@@ -551,7 +553,6 @@ impl RuntimeHandlerManager {
         }
     }
 
-    #[instrument(skip_all, parent = self.trace_parent().await.unwrap_or_else(Span::none))]
     pub async fn handler_task_message(&self, req: TaskRequest) -> Result<TaskResponse> {
         if let TaskRequest::CreateContainer(container_config) = req {
             // get oci spec
@@ -573,56 +574,68 @@ impl RuntimeHandlerManager {
             self.task_init_runtime_instance(&mut spec, &state, &container_config.options)
                 .await
                 .context("try init runtime instance")?;
-            let instance = self
-                .get_runtime_instance()
-                .await
-                .context("get runtime instance")?;
-            let root_span = self.trace_parent().await.unwrap_or_else(Span::none);
 
-            instance
-                .sandbox
-                .start()
-                .instrument(root_span.clone())
-                .await
-                .context("start sandbox in task handler")?;
-
-            let bundle = container_config.bundle.clone();
-            let container_id = container_config.container_id.clone();
-            let shim_pid = instance
-                .container_manager
-                .create_container(container_config, spec)
-                .instrument(root_span)
-                .await
-                .context("create container")?;
-
-            let container_manager = instance.container_manager.clone();
-            let process_id =
-                ContainerProcess::new(&container_id, "").context("create container process")?;
-            let pid = shim_pid.pid;
-            tokio::spawn(async move {
-                let result = instance
-                    .sandbox
-                    .wait_process(container_manager, process_id, pid)
-                    .await;
-                if let Err(e) = result {
-                    error!(sl!(), "sandbox wait process error: {:?}", e);
+            let mut request_span = Span::current();
+            if request_span.is_disabled() {
+                // Tracing starts during initialization; this span covers only the remaining work.
+                if let Some(root) = self.trace_parent().await {
+                    request_span = info_span!(parent: &root, "ttrpc.task.Create.post-init",
+                        container_id = %container_config.container_id,
+                        success = tracing::field::Empty);
                 }
-            });
+            }
+            let result = async {
+                let instance = self
+                    .get_runtime_instance()
+                    .await
+                    .context("get runtime instance")?;
+                instance
+                    .sandbox
+                    .start()
+                    .await
+                    .context("start sandbox in task handler")?;
 
-            let msg_sender = self.inner.read().await.msg_sender.clone();
-            let event = TaskCreate {
-                container_id,
-                bundle,
-                pid,
-                ..Default::default()
-            };
-            let msg = Message::new(Action::Event(Arc::new(event)));
-            msg_sender
-                .send(msg)
-                .await
-                .context("send task create event")?;
+                let bundle = container_config.bundle.clone();
+                let container_id = container_config.container_id.clone();
+                let shim_pid = instance
+                    .container_manager
+                    .create_container(container_config, spec)
+                    .await
+                    .context("create container")?;
 
-            Ok(TaskResponse::CreateContainer(shim_pid))
+                let container_manager = instance.container_manager.clone();
+                let process_id =
+                    ContainerProcess::new(&container_id, "").context("create container process")?;
+                let pid = shim_pid.pid;
+                tokio::spawn(async move {
+                    let result = instance
+                        .sandbox
+                        .wait_process(container_manager, process_id, pid)
+                        .await;
+                    if let Err(e) = result {
+                        error!(sl!(), "sandbox wait process error: {:?}", e);
+                    }
+                });
+
+                let msg_sender = self.inner.read().await.msg_sender.clone();
+                let event = TaskCreate {
+                    container_id,
+                    bundle,
+                    pid,
+                    ..Default::default()
+                };
+                let msg = Message::new(Action::Event(Arc::new(event)));
+                msg_sender
+                    .send(msg)
+                    .await
+                    .context("send task create event")?;
+
+                Ok(TaskResponse::CreateContainer(shim_pid))
+            }
+            .instrument(request_span.clone())
+            .await;
+            request_span.record("success", result.is_ok());
+            result
         } else {
             // A teardown RPC must still make the shim daemon exit even when
             // the runtime instance was never (fully) created -- e.g. after a

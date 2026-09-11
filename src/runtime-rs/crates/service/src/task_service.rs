@@ -15,6 +15,7 @@ use containerd_shim_protos::{api, shim_async};
 use ttrpc::{self, r#async::TtrpcContext};
 
 use runtimes::RuntimeHandlerManager;
+use tracing::{info_span, Instrument, Span};
 
 pub(crate) struct TaskService {
     handler: Arc<RuntimeHandlerManager>,
@@ -53,31 +54,42 @@ impl TaskService {
 }
 
 macro_rules! impl_service {
-    ($($name: tt | $req: ty | $resp: ty),*) => {
+    ($($name: tt | $span: literal $(, $field:ident)* | $req: ty | $resp: ty),*) => {
         #[async_trait]
         impl shim_async::Task for TaskService {
             $(async fn $name(&self, ctx: &TtrpcContext, req: $req) -> ttrpc::Result<$resp> {
-                self.handler_message(ctx, req).await
+                let request_span = self.handler.trace_parent().await.map_or_else(Span::none, |parent| {
+                    info_span!(parent: &parent, $span, container_id = %req.id,
+                        $($field = %req.$field,)* success = tracing::field::Empty)
+                });
+                let result = self.handler_message(ctx, req).instrument(request_span.clone()).await;
+                request_span.record("success", result.is_ok());
+                result
             })*
         }
     };
 }
 
 impl_service!(
-    state | api::StateRequest | api::StateResponse,
-    create | api::CreateTaskRequest | api::CreateTaskResponse,
-    start | api::StartRequest | api::StartResponse,
-    delete | api::DeleteRequest | api::DeleteResponse,
-    pids | api::PidsRequest | api::PidsResponse,
-    pause | api::PauseRequest | api::Empty,
-    resume | api::ResumeRequest | api::Empty,
-    kill | api::KillRequest | api::Empty,
-    exec | api::ExecProcessRequest | api::Empty,
-    resize_pty | api::ResizePtyRequest | api::Empty,
-    update | api::UpdateTaskRequest | api::Empty,
-    wait | api::WaitRequest | api::WaitResponse,
-    stats | api::StatsRequest | api::StatsResponse,
-    connect | api::ConnectRequest | api::ConnectResponse,
-    shutdown | api::ShutdownRequest | api::Empty,
-    close_io | api::CloseIORequest | api::Empty
+    state | "ttrpc.task.State" | api::StateRequest | api::StateResponse,
+    create | "ttrpc.task.Create" | api::CreateTaskRequest | api::CreateTaskResponse,
+    start | "ttrpc.task.Start",
+    exec_id | api::StartRequest | api::StartResponse,
+    delete | "ttrpc.task.Delete",
+    exec_id | api::DeleteRequest | api::DeleteResponse,
+    pids | "ttrpc.task.Pids" | api::PidsRequest | api::PidsResponse,
+    pause | "ttrpc.task.Pause" | api::PauseRequest | api::Empty,
+    resume | "ttrpc.task.Resume" | api::ResumeRequest | api::Empty,
+    kill | "ttrpc.task.Kill",
+    exec_id | api::KillRequest | api::Empty,
+    exec | "ttrpc.task.Exec",
+    exec_id | api::ExecProcessRequest | api::Empty,
+    resize_pty | "ttrpc.task.ResizePty" | api::ResizePtyRequest | api::Empty,
+    update | "ttrpc.task.Update" | api::UpdateTaskRequest | api::Empty,
+    wait | "ttrpc.task.Wait",
+    exec_id | api::WaitRequest | api::WaitResponse,
+    stats | "ttrpc.task.Stats" | api::StatsRequest | api::StatsResponse,
+    connect | "ttrpc.task.Connect" | api::ConnectRequest | api::ConnectResponse,
+    shutdown | "ttrpc.task.Shutdown" | api::ShutdownRequest | api::Empty,
+    close_io | "ttrpc.task.CloseIO" | api::CloseIORequest | api::Empty
 );

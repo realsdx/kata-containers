@@ -7200,6 +7200,7 @@ dependencies = [
  "slog",
  "slog-scope",
  "tokio",
+ "tracing",
  "ttrpc",
 ]
 
