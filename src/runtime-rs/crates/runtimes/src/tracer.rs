@@ -103,7 +103,7 @@ impl KataTracer {
             .with_endpoint(endpoint)
             .with_username(jaeger_username)
             .with_password(jaeger_password)
-            .with_hyper()
+            .with_reqwest()
             .install_batch(Tokio)?;
 
         let layer = tracing_opentelemetry::layer().with_tracer(tracer);
