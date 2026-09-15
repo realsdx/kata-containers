@@ -119,7 +119,9 @@ impl KataTracer {
         tracing::subscriber::set_global_default(subscriber.clone())?;
         self.subscriber = subscriber;
 
-        self.root_span = Some(span!(parent: None, tracing::Level::TRACE, "root-span"));
+        // Keep one owned handle so all shim requests can share a sandbox-lifetime parent.
+        self.root_span =
+            Some(span!(parent: None, tracing::Level::TRACE, "root-span", sandbox_id = %sid));
 
         // modity the enable state, note that we have successfully enable tracing
         self.enable();

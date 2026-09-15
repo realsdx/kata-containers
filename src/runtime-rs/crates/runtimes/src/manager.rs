@@ -121,7 +121,7 @@ impl RuntimeHandlerManagerInner {
         })
     }
 
-    #[instrument]
+    #[instrument(skip_all)]
     async fn init_runtime_handler(
         &mut self,
         sandbox_config: SandboxConfig,

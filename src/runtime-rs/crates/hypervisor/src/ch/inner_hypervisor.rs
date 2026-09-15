@@ -54,6 +54,7 @@ use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::{io::AsyncBufReadExt, sync::mpsc};
+use tracing::{instrument, Span};
 
 const CH_NAME: &str = "clh";
 
@@ -98,6 +99,7 @@ pub enum GuestProtectionError {
 }
 
 impl CloudHypervisorInner {
+    #[instrument(skip_all)]
     async fn start_hypervisor(&mut self, timeout_secs: i32) -> Result<()> {
         self.cloud_hypervisor_launch(timeout_secs)
             .await
@@ -187,6 +189,7 @@ impl CloudHypervisorInner {
         Ok(kernel_params)
     }
 
+    #[instrument(skip_all)]
     async fn boot_vm(&mut self) -> Result<()> {
         let (shared_fs_devices, network_devices, host_devices, protection_device, boot_disks) =
             self.get_shared_devices().await?;
@@ -350,6 +353,7 @@ impl CloudHypervisorInner {
         Self::write_json_file(config_path, &config)
     }
 
+    #[instrument(skip_all)]
     fn prepare_restore_files(&self) -> Result<()> {
         let template_dir = self
             .template_dir()
@@ -372,6 +376,7 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn restore_vm(&self) -> Result<()> {
         let vm_path = PathBuf::from(&self.vm_path);
         let state_file = vm_path.join(CLH_TEMPLATE_STATE_FILE);
@@ -404,6 +409,7 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn cloud_hypervisor_setup_comms(&mut self) -> Result<()> {
         let api_socket_path = get_api_socket_path(&self.id)?;
 
@@ -447,6 +453,7 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn cloud_hypervisor_check_running(&mut self) -> Result<()> {
         let timeout_secs = self.timeout_secs;
 
@@ -471,6 +478,7 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     async fn cloud_hypervisor_launch(&mut self, _timeout_secs: i32) -> Result<()> {
         self.cloud_hypervisor_ensure_not_launched().await?;
 
@@ -789,13 +797,31 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(
+        skip_all,
+        fields(
+            template_requested = self.config.vm_template.boot_from_template,
+            startup_mode = tracing::field::Empty
+        )
+    )]
     pub(crate) async fn start_vm(&mut self, timeout_secs: i32) -> Result<()> {
         self.timeout_secs = timeout_secs;
         self.start_hypervisor(self.timeout_secs).await?;
 
         self.state = VmmState::VmmServerReady;
 
-        if self.config.vm_template.boot_from_template && self.should_restore_from_template() {
+        let template_requested = self.config.vm_template.boot_from_template;
+        let restore_from_template = template_requested && self.should_restore_from_template();
+        let startup_mode = if restore_from_template {
+            "template_restore"
+        } else if template_requested {
+            "template_fallback"
+        } else {
+            "cold"
+        };
+        Span::current().record("startup_mode", startup_mode);
+
+        if restore_from_template {
             self.prepare_restore_files()?;
             self.restore_vm().await?;
             self.resume_vm().await?;
@@ -841,6 +867,7 @@ impl CloudHypervisorInner {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     pub(crate) async fn resume_vm(&self) -> Result<()> {
         let response = cloud_hypervisor_vm_resume(&self.api_socket).await?;
         if let Some(detail) = response {
