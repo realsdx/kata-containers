@@ -23,6 +23,10 @@ strum = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { default-features = false, features = [
+  "registry",
+  "std",
+], version = "0.3" }
 url = { workspace = true }
 uuid = { features = ["v4"], version = "1" }
 

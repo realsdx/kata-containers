@@ -13,6 +13,8 @@ use awaitgroup::{WaitGroup, Worker as WaitGroupWorker};
 use common::types::{ContainerProcess, ProcessExitStatus, ProcessStateInfo, ProcessStatus, PID};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{watch, RwLock};
+use tracing::{info_span, Instrument, Span};
+use tracing_subscriber::{registry::LookupSpan, Registry};
 
 use super::container::Container;
 use super::io::{BinaryLogger, ContainerIo, PassfdIo, ShimIo};
@@ -104,6 +106,29 @@ fn is_binary_stdio(value: &str) -> bool {
 }
 
 impl Process {
+    fn wait_span(&self, io_mode: &'static str) -> Span {
+        // Wait tasks outlive Start/Exec. Use the sandbox ancestor so those request spans
+        // can close when their RPCs return, without passing a root handle through the I/O APIs.
+        Span::current()
+            .with_subscriber(|(current, dispatch)| {
+                // This lookup depends on KataTracer's Registry and root target/name.
+                let registry = dispatch.downcast_ref::<Registry>()?;
+                let current = registry.span(current)?;
+                let root = current.scope().find(|span| {
+                    span.metadata().target() == "runtimes::tracer" && span.name() == "root-span"
+                })?;
+                // Span IDs belong to their subscriber; create the child using the same dispatch.
+                Some(tracing::dispatcher::with_default(dispatch, || {
+                    info_span!(parent: root.id(), "agent.process.wait",
+                        container_id = %self.process.container_id(),
+                        exec_id = %self.process.exec_id(), io_mode)
+                }))
+            })
+            .flatten()
+            // Without a matching root, leave the task uninstrumented rather than retain the request.
+            .unwrap_or_else(Span::none)
+    }
+
     pub fn new(
         process: &ContainerProcess,
         pid: u32,
@@ -200,12 +225,13 @@ impl Process {
     ) -> Result<()> {
         let logger = self.logger.clone();
         info!(logger, "start passfd io wait");
+        let wait_span = self.wait_span("passfd");
         let process = self.process.clone();
         let exit_status = self.exit_status.clone();
         let exit_notifier = self.exit_watcher_tx.take();
         let status = self.status.clone();
 
-        tokio::spawn(async move {
+        let wait_task = async move {
             let req = agent::WaitProcessRequest {
                 process_id: process.clone().into(),
             };
@@ -254,7 +280,8 @@ impl Process {
 
             drop(exit_notifier);
             info!(logger, "end passfd io wait thread");
-        });
+        };
+        tokio::spawn(wait_task.instrument(wait_span));
         Ok(())
     }
 
@@ -379,12 +406,13 @@ impl Process {
     ) -> Result<()> {
         let logger = self.logger.clone();
         info!(logger, "start run io wait");
+        let wait_span = self.wait_span("legacy");
         let process = self.process.clone();
         let exit_status = self.exit_status.clone();
         let exit_notifier = self.exit_watcher_tx.take();
         let status = self.status.clone();
 
-        tokio::spawn(async move {
+        let wait_task = async move {
             // wait on all of the container's io stream terminated
             info!(logger, "begin wait group io");
             wg.wait().await;
@@ -440,7 +468,8 @@ impl Process {
 
             drop(exit_notifier);
             info!(logger, "end io wait thread");
-        });
+        };
+        tokio::spawn(wait_task.instrument(wait_span));
         Ok(())
     }
 

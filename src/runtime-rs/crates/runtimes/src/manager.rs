@@ -607,7 +607,11 @@ impl RuntimeHandlerManager {
                 let process_id =
                     ContainerProcess::new(&container_id, "").context("create container process")?;
                 let pid = shim_pid.pid;
-                tokio::spawn(async move {
+                let wait_span = self.trace_parent().await.map_or_else(Span::none, |root| {
+                    info_span!(parent: &root, "sandbox.process.wait",
+                        container_id = %process_id.container_id(), exec_id = %process_id.exec_id())
+                });
+                let wait_task = async move {
                     let result = instance
                         .sandbox
                         .wait_process(container_manager, process_id, pid)
@@ -615,7 +619,8 @@ impl RuntimeHandlerManager {
                     if let Err(e) = result {
                         error!(sl!(), "sandbox wait process error: {:?}", e);
                     }
-                });
+                };
+                tokio::spawn(wait_task.instrument(wait_span));
 
                 let msg_sender = self.inner.read().await.msg_sender.clone();
                 let event = TaskCreate {
@@ -805,12 +810,17 @@ impl RuntimeHandlerManager {
                 let pid = shim_pid.pid;
                 let process_type = process_id.process_type;
                 let container_id = process_id.container_id().to_string();
-                tokio::spawn(async move {
+                let wait_span = self.trace_parent().await.map_or_else(Span::none, |root| {
+                    info_span!(parent: &root, "sandbox.process.wait",
+                        container_id = %process_id.container_id(), exec_id = %process_id.exec_id())
+                });
+                let wait_task = async move {
                     let result = sandbox.wait_process(cm, process_id, pid).await;
                     if let Err(e) = result {
                         error!(sl!(), "sandbox wait process error: {:?}", e);
                     }
-                });
+                };
+                tokio::spawn(wait_task.instrument(wait_span));
 
                 if process_type == ProcessType::Container {
                     let event = TaskStart {
