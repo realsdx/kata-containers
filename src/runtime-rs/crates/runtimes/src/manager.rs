@@ -429,7 +429,6 @@ impl RuntimeHandlerManager {
     }
 
     //init the sandbox for the normal task api
-    #[instrument(skip_all)]
     async fn task_init_runtime_instance(
         &self,
         spec: &mut oci::Spec,
@@ -724,7 +723,6 @@ impl RuntimeHandlerManager {
         }
     }
 
-    #[instrument(skip_all)]
     pub async fn handler_task_request(&self, req: TaskRequest) -> Result<TaskResponse> {
         let instance = self
             .get_runtime_instance()

@@ -1007,25 +1007,14 @@ fn oci_spec_vfio_device_paths() -> Vec<String> {
         .collect()
 }
 
-#[async_trait]
-impl Sandbox for VirtSandbox {
-    #[instrument(name = "sb: start", skip_all)]
-    async fn start(&self) -> Result<()> {
+impl VirtSandbox {
+    #[instrument(name = "sandbox.start", skip_all)]
+    async fn start_once(
+        &self,
+        sandbox_config: &SandboxConfig,
+        mut inner: tokio::sync::RwLockWriteGuard<'_, SandboxInner>,
+    ) -> Result<()> {
         let id = &self.sid;
-
-        if self.sandbox_config.is_none() {
-            return Err(anyhow!("sandbox config is missing"));
-        }
-        let sandbox_config = self.sandbox_config.as_ref().unwrap();
-
-        // if sandbox is not in SandboxState::Init then return,
-        // otherwise try to create sandbox
-
-        let mut inner = self.inner.write().await;
-        if inner.state != SandboxState::Init {
-            warn!(sl!(), "sandbox is started");
-            return Ok(());
-        }
         let selinux_label = load_oci_spec().ok().and_then(|spec| {
             spec.process()
                 .as_ref()
@@ -1242,6 +1231,25 @@ impl Sandbox for VirtSandbox {
             .context("save state")?;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Sandbox for VirtSandbox {
+    async fn start(&self) -> Result<()> {
+        let sandbox_config = self
+            .sandbox_config
+            .as_ref()
+            .ok_or_else(|| anyhow!("sandbox config is missing"))?;
+
+        // Only trace actual startup work, not idempotent calls after startup.
+        let inner = self.inner.write().await;
+        if inner.state != SandboxState::Init {
+            warn!(sl!(), "sandbox is started");
+            return Ok(());
+        }
+
+        self.start_once(sandbox_config, inner).await
     }
 
     /// Core function for starting a VM from a template

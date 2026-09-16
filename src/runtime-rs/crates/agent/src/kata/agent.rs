@@ -23,7 +23,7 @@ fn new_ttrpc_ctx(timeout: i64) -> ttrpc_ctx::Context {
 
 #[async_trait]
 impl AgentManager for KataAgent {
-    #[instrument]
+    #[instrument(name = "agent.start", skip_all, fields(address = %address))]
     async fn start(&self, address: &str) -> Result<()> {
         info!(sl!(), "begin to connect agent {:?}", address);
         self.set_socket_address(address)

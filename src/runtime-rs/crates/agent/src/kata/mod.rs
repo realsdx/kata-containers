@@ -99,6 +99,7 @@ impl KataAgent {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn connect_agent_server(&self) -> Result<()> {
         let mut inner = self.inner.write().await;
 
@@ -124,6 +125,7 @@ impl KataAgent {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn start_log_forwarder(&self) -> Result<()> {
         let mut inner = self.inner.write().await;
         let config = sock::ConnectConfig::new(

@@ -466,18 +466,15 @@ impl ContainerManager for VirtContainerManager {
         Ok(PID { pid: vmm_pid })
     }
 
-    #[instrument]
     async fn connect_container(&self, _id: &ContainerID) -> Result<PID> {
         let vmm_pid = self.get_vmm_master_tid().await?;
         Ok(PID { pid: vmm_pid })
     }
 
-    #[instrument]
     async fn need_shutdown_sandbox(&self, req: &ShutdownRequest) -> bool {
         req.is_now || self.sid == req.container_id
     }
 
-    #[instrument]
     async fn is_sandbox_container(&self, process: &ContainerProcess) -> bool {
         process.process_type == ProcessType::Container
             && process.container_id.container_id == self.sid

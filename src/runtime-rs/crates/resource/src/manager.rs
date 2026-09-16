@@ -176,6 +176,7 @@ impl ResourceManager {
         inner.get_storage_for_sandbox(shm_size).await
     }
 
+    #[instrument(skip_all)]
     pub async fn handler_rootfs(
         &self,
         cid: &str,
